@@ -9,18 +9,18 @@ This page contains the setup guide and reference information for the [Airtable](
 ## Prerequisites
 
 - An active Airtable account
-- [Personal Access Token](https://airtable.com/developers/web/guides/personal-access-tokens) with the following scopes:
-  - `data.records:read`
-  - `data.recordComments:read`
-  - `schema.bases:read`
+- One of the following:
+  - On Airbyte Cloud, an Airtable account you can authorize with OAuth
+  - A [Personal Access Token](https://airtable.com/developers/web/guides/personal-access-tokens) with the following scopes:
+    - `data.records:read`
+    - `data.recordComments:read`
+    - `schema.bases:read`
 
 ## Setup guide
 
 ### Step 1: Set up Airtable
 
-<!-- env:oss -->
-
-#### For Airbyte Open Source:
+Create a Personal Access Token. Airbyte Open Source requires one. On Airbyte Cloud, skip this step if you plan to authenticate with OAuth.
 
 1. Go to https://airtable.com/create/tokens to create new token.
    ![Generate new Token](/.gitbook/assets/source/airtable/generate_new_token.png)
@@ -35,13 +35,12 @@ This page contains the setup guide and reference information for the [Airtable](
 3. Select required bases or allow access to all available and press the `Create Token` button.
    ![Add Bases](/.gitbook/assets/source/airtable/add_bases.png)
 4. Save token from the popup window.
-<!-- /env:oss -->
 
 ### Step 2: Set up Airtable connector in Airbyte
 
 <!-- env:cloud -->
 
-### For Airbyte Cloud:
+#### For Airbyte Cloud
 
 1. [Log into your Airbyte Cloud](https://cloud.airbyte.com/workspaces) account.
 2. Click Sources and then click + New source.
@@ -51,16 +50,17 @@ This page contains the setup guide and reference information for the [Airtable](
 
    - To authenticate using OAuth, select **OAuth2.0** from the Authentication dropdown click **Authenticate your Airtable account** to sign in with Airtable, select required workspaces you want to sync and authorize your account.
    - To authenticate using a Personal Access Token, select **Personal Access Token** from the Authentication dropdown and enter the Access Token for your Airtable account.
-     :::info
-     When using OAuth, you may see a `400` or `401` error causing a failed sync. If this occurs, re-authenticate your Airtable connector by clicking **Authenticate your Airtable account** again in the connector settings.
-     :::
+
+   :::info
+   When using OAuth, you may see a `400` or `401` error causing a failed sync. If this occurs, re-authenticate your Airtable connector by clicking **Authenticate your Airtable account** again in the connector settings.
+   :::
 
 6. Click **Set up source**.
 <!-- /env:cloud -->
 
 <!-- env:oss -->
 
-### For Airbyte Open Source:
+#### For Airbyte Open Source
 
 1. Navigate to the Airbyte Open Source dashboard.
 2. In the left navigation bar, click **Sources**. In the top-right corner, click **+new source**.
@@ -73,12 +73,12 @@ This page contains the setup guide and reference information for the [Airtable](
 
 The Airtable connector provides the following optional configuration settings:
 
-- **Number of Concurrent Threads**: Controls the number of concurrent threads used for syncing (default: 5, minimum: 2, maximum: 40). Higher values can improve sync performance when syncing multiple bases or when there is I/O wait time. The connector automatically respects Airtable's rate limit of 5 requests per second per base, so increasing this value will not cause rate limit errors.
+- **Number of Concurrent Threads**: Controls the number of concurrent threads used for syncing (default: 5, minimum: 2, maximum: 40). Higher values can improve sync performance when there is I/O wait time. The connector limits its own requests to 5 per second, which matches Airtable's per-base rate limit, so increasing this value doesn't cause rate limit errors.
 - **Add Base ID to Stream Name**: When enabled, includes the Airtable base ID in stream names to ensure uniqueness. This is useful if you have cloned Airtable bases with tables that share the same name. Enabling this option changes stream names and requires a full refresh of your data.
 
 ### Note on changed table names and deleted tables
 
-Please keep in mind that if you start syncing a table via Airbyte, then rename it in your Airtable account, the connector will not continue syncing that table until you reset your connection schema and select it again. At that point, the table will begin syncing to a table with the new name in the destination. This is because there is no way for Airtable to tell Airbyte which tables have been renamed. Similarly, if you delete a table that was previously syncing, the connector will stop syncing it.
+Stream names include the table name. If you rename a table in Airtable after you start syncing it, the connector stops syncing the old stream. Refresh the source schema and select the stream with the new name to resume syncing that table to a destination table with the new name. Airtable doesn't tell Airbyte which tables were renamed. Similarly, if you delete a table that was previously syncing, the connector stops syncing it.
 
 ## Supported sync modes
 
@@ -89,11 +89,29 @@ The Airtable source connector supports the following [sync modes](https://docs.a
 - [Incremental - Append](https://docs.airbyte.com/platform/using-airbyte/core-concepts/sync-modes/incremental-append)
 - [Incremental - Append + Deduped](https://docs.airbyte.com/platform/using-airbyte/core-concepts/sync-modes/incremental-append-deduped) (select a primary key such as `_airtable_id`; Airtable does not provide a source-defined primary key)
 
-Incremental sync compares Airtable's `LAST_MODIFIED_TIME()` with the cursor, falling back to `CREATED_TIME()` when Airtable leaves last-modified blank for never-edited records. Changes only to computed fields (formula, rollup, lookup, and count) are not picked up, and deleted records are not captured. A 15-minute lookback re-reads recent records. `_airtable_extracted_at` is the cursor and contains the end time of the sync window.
+### Incremental sync
+
+Incremental sync is available for all table streams. The first incremental sync reads every record. Later syncs request only records whose [`LAST_MODIFIED_TIME()`](https://support.airtable.com/docs/formula-field-reference) is after the saved cursor, minus a 15-minute lookback. For records that were never edited, Airtable leaves `LAST_MODIFIED_TIME()` blank, so the connector compares `CREATED_TIME()` instead.
+
+Keep the following behavior in mind:
+
+- **Cursor field**: Airtable records don't include a last-modified timestamp, so the connector adds `_airtable_extracted_at` as the cursor. It contains the end time of the sync window, not the time the record changed. All records emitted in one sync share the same value.
+- **Duplicates**: The 15-minute lookback re-reads recently changed records, so Incremental - Append can emit the same record more than once. Use Incremental - Append + Deduped with `_airtable_id` as the primary key to keep one row per record.
+- **Computed fields**: `LAST_MODIFIED_TIME()` only tracks changes a user makes to non-computed fields. If only a formula, rollup, lookup, or count value changes, the record isn't re-synced.
+- **Deleted records**: Incremental syncs don't capture deleted records. To remove deleted records from the destination, use Full Refresh - Overwrite.
 
 ## Supported Streams
 
-This source syncs all tables from your Airtable bases using the Metadata API. If you rename or add a column to an existing table, refresh the source schema in Airbyte to update the catalog.
+This source syncs all tables from your Airtable bases using the Metadata API. Each table is a separate stream named `{base_name}/{table_name}/{table_id}`. If you enable **Add Base ID to Stream Name**, the format is `{base_name}/{base_id}/{table_name}/{table_id}`. Base names, table names, and field names are lowercased, and spaces are replaced with underscores.
+
+In addition to the table's fields, each record includes the following fields:
+
+- `_airtable_id`: The Airtable record ID
+- `_airtable_created_time`: The time the record was created
+- `_airtable_table_name`: The name of the table
+- `_airtable_extracted_at`: The incremental sync cursor. See [Incremental sync](#incremental-sync).
+
+The connector skips records that have no field values. If you rename or add a column to an existing table, refresh the source schema in Airbyte to update the catalog.
 
 ### Performance considerations
 
@@ -161,7 +179,7 @@ If you use Airbyte Cloud and your organization restricts access to specific IPs,
 
 | Version    | Date       | Pull Request                                             | Subject                                                                                 |
 |:-----------|:-----------|:---------------------------------------------------------|:----------------------------------------------------------------------------------------|
-| 4.7.0 | 2026-10-15 | [89000](https://github.com/airbytehq/airbyte/pull/89000) | Add incremental sync support for table streams |
+| 4.7.0 | 2026-11-03 | [89000](https://github.com/airbytehq/airbyte/pull/89000) | Add incremental sync support for table streams |
 | 4.6.43 | 2026-10-13 | [88520](https://github.com/airbytehq/airbyte/pull/88520) | Update dependencies |
 | 4.6.42 | 2026-10-06 | [87744](https://github.com/airbytehq/airbyte/pull/87744) | Update dependencies |
 | 4.6.41 | 2026-09-29 | [87090](https://github.com/airbytehq/airbyte/pull/87090) | Update dependencies |
